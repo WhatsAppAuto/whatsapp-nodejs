@@ -1,139 +1,104 @@
-const crypto = require('crypto');
-const curve = require('curve25519-n');
+const axlsign = require("axlsign");
+const sjcl = require("../lib/sjcl");
 
-const CIPHER_ALGORITHM = 'aes-256-cbc';
+const ba = sjcl.bitArray;
 
-/**
- * getKeyPairFromSecretKey
- * @param {Number} n
- * @return {Buffer}
- */
-const randomBytes = (n = 16) => crypto.randomBytes(n);
+const generateRandomBytes = (n = 16) =>
+  sjcl.codec.base64.fromBits(sjcl.random.randomWords(n / 4));
 
-const toBase64 = () => Buffer.from(bytes).toString('base64');
-
-const toHEX = () => Buffer.from(bytes).toString('hex');
+const base64ToBitArray = str => sjcl.codec.base64.toBits(str);
 
 /**
- * HmacSHA256
- * @param {Buffer} key
- * @param {Buffer?} sign
- * @return {Buffer}
+ * @returns {{ public: Uint8Array, private: Uint8Array }}
  */
-const hmacSHA256 = (key, sign = '') => crypto.createHmac('sha256', key)
-    .update(sign)
-    .digest();
-
-/**
- * kdfExpand
- * @param {Buffer} secret
- * @param {Number} length
- * @param {String | Buffer} info
- * @return {Buffer}
- */
-const kdfExpand = (secret, length, info = '') => {
-  const key = hmacSHA256(new Buffer(32).fill('\0'), secret);
-
-  let prev = new Buffer(0);
-  info = new Buffer(info);
-  let input;
-  const buffers = [];
-
-  for (let i = 0; i < Math.ceil(length / 32); i++) {
-    input = Buffer.concat([
-      prev,
-      info,
-      Buffer.from(String.fromCharCode(i + 1)),
-    ]);
-    prev = hmacSHA256(key, input);
-    buffers.push(prev);
-  }
-
-  return Buffer.concat(buffers, length);
+const generateKeyPair = () => {
+  let keySeed = sjcl.codec.arrayBuffer.fromBits(sjcl.random.randomWords(8));
+  return axlsign.generateKeyPair(new Uint8Array(keySeed));
 };
 
-/**
- * generateKeys
- * @return {{ publicKey: Buffer, privateKey: Buffer }}
- */
-const generateKeys = () => {
-  const secret = randomBytes(32);
-  console.log(' --------- GENERATE KEYS ----------');
+const generateSharedSecret = (private, secretPublicKey) =>
+  axlsign.sharedKey(private, secretPublicKey);
 
-  curve.makeSecretKey(secret);
-  const publicKey = curve.derivePublicKey(secret);
-
-  console.log('secretKey', secret.toString('hex'), secret.length);
-  console.log('publicKey', publicKey.toString('hex'), publicKey.length);
-
-  return {
-    secretKey: secret,
-    publicKey,
-  };
-};
-
-/**
- * getSharedKey
- * @param {Buffer} secretKey
- * @param {Buffer} publicKey
- * @return {Buffer}
- */
-const getSharedKey = (secretKey, publicKey) => curve
-    .deriveSharedSecret(secretKey, publicKey);
-
-/**
- * aesEncrypt
- * @param {Buffer} key
- * @param {String} plainText
- * @return {Buffer}
- */
-const aesEncrypt = (key, plainText) => {
-  if (typeof plaintext !== 'string' || !plaintext) {
-    throw new TypeError('Provided "plaintext" must be a non-empty string');
-  }
-  const IV = randomBytes(16);
-  const cipher = crypto.createCipheriv(CIPHER_ALGORITHM, hmacSHA256(key), IV);
-
-  const ciphertext = cipher.update(new Buffer(plaintext));
-  const encrypted = Buffer.concat([iv, ciphertext, cipher.final()]);
-
-  return encrypted;
-};
-
-/**
- * aesDecrypt
- * @param {Buffer} key
- * @param {Buffer | String} encrypted
- * @return {Buffer}
- */
-const aesDecrypt = (key, encrypted) => {
-  if (typeof encrypted !== 'string' || !encrypted) {
-    throw new TypeError('Provided "encrypted" must be a non-empty string');
-  }
-
-  const input = Buffer.from(encrypted);
-
-  const IV = input.slice(0, 16);
-  const decipher = crypto.createDecipheriv(
-      CIPHER_ALGORITHM,
-      hmacSHA256(key),
-      IV,
+const generateSecreyPublicKey = secret =>
+  new Uint8Array(
+    sjcl.codec.arrayBuffer.fromBits(ba.bitSlice(secret, 0, 32 * 8))
   );
 
-  const ciphertext = input.slice(16);
-  const plaintext = decipher.update(ciphertext) + decipher.final();
+const numToBits = n =>
+  sjcl.codec.hex.toBits((n < 16 ? "0" : "") + n.toString(16));
 
-  return Buffer.from(plaintext);
-};
+function repeatedNumToBits(n, repeats) {
+  let nBits = numToBits(n),
+    ret = [];
+  for (let i = 0; i < repeats; i++) ret = sjcl.bitArray.concat(ret, nBits);
+  return ret;
+}
+
+//expects key and sign to be bit arrays
+const HmacSha256 = (keyBits, signBits) =>
+  new sjcl.misc.hmac(keyBits, sjcl.hash.sha256).mac(signBits);
+
+function HKDF(key, length) {
+  //expects key to be bit array, implements RFC 5869, some parts translated from https://github.com/MirkoDziadzka/pyhkdf
+  let keyStream = [],
+    keyBlock = [],
+    blockIndex = 1;
+  while (keyStream.length < length) {
+    keyBlock = HmacSha256(
+      key,
+      sjcl.bitArray.concat(keyBlock, numToBits(blockIndex))
+    );
+    blockIndex++;
+    keyStream = sjcl.bitArray.concat(keyStream, keyBlock);
+  }
+  return sjcl.bitArray.clamp(keyStream, length * 8);
+}
+
+const AES_BLOCK_SIZE = 16;
+
+sjcl.beware[
+  "CBC mode is dangerous because it doesn't protect message integrity."
+]();
+
+function AESEncrypt(key, plainbits) {
+  let iv = sjcl.random.randomWords(AES_BLOCK_SIZE / 4);
+  let prp = new sjcl.cipher.aes(key);
+  let encrypted = sjcl.mode.cbc.encrypt(prp, plainbits, iv);
+  return sjcl.bitArray.concat(iv, encrypted);
+}
+
+function AESDecrypt(key, cipherbits) {
+  let iv = sjcl.bitArray.bitSlice(cipherbits, 0, AES_BLOCK_SIZE * 8);
+  let prp = new sjcl.cipher.aes(key);
+  let decrypted = sjcl.mode.cbc.decrypt(
+    prp,
+    sjcl.bitArray.bitSlice(cipherbits, AES_BLOCK_SIZE * 8),
+    iv
+  );
+  return decrypted;
+}
+
+function toArrayBuffer(buf) {
+  var ab = new ArrayBuffer(buf.length);
+  var view = new Uint8Array(ab);
+  for (var i = 0; i < buf.length; ++i) {
+    view[i] = buf[i];
+  }
+  return ab;
+}
 
 module.exports = {
-  randomBytes,
-  toBase64,
-  toHEX,
-  generateKeys,
-  getSharedKey,
-  hmacSHA256,
-  kdfExpand,
-  aesEncrypt,
-  aesDecrypt,
+  generateKeyPair,
+  AESDecrypt,
+  AESEncrypt,
+  generateRandomBytes,
+  base64ToBitArray,
+  generateSecreyPublicKey,
+  generateSharedSecret,
+  HKDF,
+  HmacSha256,
+  repeatedNumToBits,
+  sjcl,
+  ba,
+  toArrayBuffer
 };

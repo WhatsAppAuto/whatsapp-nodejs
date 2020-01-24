@@ -1,5 +1,5 @@
-const WebSocket = require('ws');
-const {log } = require('../utils');
+const WebSocket = require("ws");
+const { log } = require("../utils");
 
 /**
  * WebSocketService.
@@ -7,10 +7,10 @@ const {log } = require('../utils');
  */
 class WebSocketService {
   constructor() {
-    this.ws = new WebSocket('wss://web.whatsapp.com/ws', {
+    this.ws = new WebSocket("wss://web.whatsapp.com/ws", {
       headers: {
-        Origin: 'https://web.whatsapp.com',
-      },
+        Origin: "https://web.whatsapp.com"
+      }
     });
   }
 

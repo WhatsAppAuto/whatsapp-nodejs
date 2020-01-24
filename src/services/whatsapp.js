@@ -16,7 +16,9 @@ class WhatsAppService {
       browserToken: null,
       me: null,
       secret: null,
-      sharedSecret: null
+      sharedSecret: null,
+      secretPublicKey: null,
+      sharedSecretExpanded: null
     };
 
     this.loginInfo = {
@@ -97,7 +99,46 @@ class WhatsAppService {
         }
       } else {
         if (content !== "") {
-          // TODO binray content, decrypt message
+          message = cryptoService.toArrayBuffer(message);
+
+          let ba = cryptoService.sjcl.bitArray;
+          let delimPos = new Uint8Array(message).indexOf(44); //look for index of comma because there is a message tag before it
+          let messageContent = cryptoService.sjcl.codec.arrayBuffer.toBits(
+            message.slice(delimPos + 1)
+          );
+          let hmacValidation = cryptoService.HmacSha256(
+            this.loginInfo.key.macKey,
+            cryptoService.ba.bitSlice(messageContent, 32 * 8)
+          );
+          if (
+            !cryptoService.sjcl.bitArray.equal(
+              hmacValidation,
+              cryptoService.ba.bitSlice(messageContent, 0, 32 * 8)
+            )
+          ) {
+            throw [
+              "hmac mismatch",
+              cryptoService.sjcl.codec.hex.fromBits(hmacValidation),
+              cryptoService.sjcl.codec.hex.fromBits(
+                ba.bitSlice(messageContent, 0, 32 * 8)
+              )
+            ];
+          }
+
+          let data = cryptoService.AESDecrypt(
+            this.loginInfo.key.encKey,
+            cryptoService.ba.bitSlice(messageContent, 32 * 8)
+          );
+
+          console.log(
+            "got binary data: ",
+            String.fromCharCode.apply(
+              null,
+              new Uint8Array(
+                cryptoService.sjcl.codec.arrayBuffer.fromBits(data, 0)
+              )
+            )
+          );
         }
       }
     }
@@ -118,14 +159,17 @@ class WhatsAppService {
   generateQR(content) {
     this.loginInfo.serverRef = JSON.parse(content).ref;
 
-    const { publicKey, secretKey } = cryptoService.generateKeys();
+    const {
+      public: publicKey,
+      private: privateKey
+    } = cryptoService.generateKeyPair();
 
-    this.loginInfo.secretKey = secretKey;
-    this.loginInfo.publicKey = publicKey;
+    this.loginInfo["secretKey"] = privateKey;
+    this.loginInfo["publicKey"] = publicKey;
 
     const qrCodeText = [
       this.loginInfo.serverRef,
-      this.loginInfo.publicKey.toString("base64"),
+      Buffer.from(publicKey).toString("base64"),
       this.loginInfo.clientId
     ].join(",");
 
@@ -142,59 +186,65 @@ class WhatsAppService {
     secret,
     serverToken,
     sharedSecret,
-    sharedSecretExpanded,
-    wid,
+    wid
   }) {
     this.connectionOpts.clientToken = clientToken;
     this.connectionOpts.serverToken = serverToken;
     this.connectionOpts.browserToken = browserToken;
     this.connectionOpts.me = wid;
 
-    this.connectionOpts.secret = Buffer.from(secret, 'base64');
-
-    // Key generation
-    this.connectionOpts.sharedSecret = cryptoService.getSharedKey(
-        this.loginInfo.secretKey,
-        this.connectionOpts.secret.slice(0, 32),
+    this.connectionOpts.secret = cryptoService.base64ToBitArray(secret);
+    this.connectionOpts.secretPublicKey = cryptoService.generateSecreyPublicKey(
+      this.connectionOpts.secret
+    );
+    this.connectionOpts.sharedSecret = cryptoService.generateSharedSecret(
+      this.loginInfo.secretKey,
+      this.connectionOpts.secretPublicKey
+    );
+    this.connectionOpts.sharedSecretExpanded = cryptoService.HKDF(
+      cryptoService.HmacSha256(
+        cryptoService.repeatedNumToBits(0, 32),
+        cryptoService.sjcl.codec.arrayBuffer.toBits(
+          this.connectionOpts.sharedSecret.buffer
+        )
+      ),
+      80
     );
 
-    console.log('sharedSecret', this.connectionOpts.sharedSecret.toString('hex'), this.connectionOpts.sharedSecret.length);
+    const sse = this.connectionOpts.sharedSecretExpanded;
 
-    this.connectionOpts.sharedSecretExpanded = cryptoService.kdfExpand(
-        this.connectionOpts.sharedSecret,
-        80,
+    let hmacValidation = cryptoService.HmacSha256(
+      cryptoService.ba.bitSlice(sse, 32 * 8, 64 * 8),
+      cryptoService.ba.concat(
+        cryptoService.ba.bitSlice(this.connectionOpts.secret, 0, 32 * 8),
+        cryptoService.ba.bitSlice(this.connectionOpts.secret, 64 * 8)
+      )
     );
 
-    console.log('sharedSecretExpanded', this.connectionOpts.sharedSecretExpanded.toString('hex'), this.connectionOpts.sharedSecretExpanded.length);
+    if (
+      !cryptoService.ba.equal(
+        hmacValidation,
+        cryptoService.ba.bitSlice(this.connectionOpts.secret, 32 * 8, 64 * 8)
+      )
+    )
+      throw "hmac mismatch";
 
-    const hmacValidation = cryptoService.hmacSHA256(
-        this.connectionOpts.sharedSecretExpanded.slice(32, 64),
-        this.connectionOpts.secret.slice(0, 32) +
-          this.connectionOpts.secret.slice(64),
+    let keysEncrypted = cryptoService.ba.concat(
+      cryptoService.ba.bitSlice(sse, 64 * 8),
+      cryptoService.ba.bitSlice(this.connectionOpts.secret, 64 * 8)
     );
 
-    console.log('hmacValidation', hmacValidation.toString('hex'), ' === ', this.connectionOpts.secret.slice(32, 64).toString('hex'));
-    if (hmacValidation != this.connectionOpts.secret.slice(32, 64)) {
-      throw new Error('Hmac mismatch');
-    }
-
-    const keysEncrypted = aesDecrypt(
-        this.connectionOpts.sharedSecretExpanded.slice(0, 32),
-        this.connectionOpts.sharedSecretExpanded.slice(64) +
-        this.connectionOpts.secret.slice(64),
+    let keysDecrypted = cryptoService.AESDecrypt(
+      cryptoService.ba.bitSlice(sse, 0, 32 * 8),
+      keysEncrypted
     );
 
-    this.loginInfo.encKey = keysEncrypted.slice(0, 32);
-    this.loginInfo.macKey = keysEncrypted.slice(32, 64);
+    const encKey = cryptoService.ba.bitSlice(keysDecrypted, 0, 32 * 8);
+    const macKey = cryptoService.ba.bitSlice(keysDecrypted, 32 * 8);
+    console.log("got encoding and mac key.");
 
-    console.log(' ---------- ENCKEY & MACKEY -----------');
-    console.log(this.loginInfo.keys);
-
-    log("PROCESS CONN");
-    Object.keys(this.connectionOpts).map(k =>
-      log(`${k} = ${this.connectionOpts[k]}`)
-    );
-    log("");
+    this.loginInfo.key.macKey = macKey;
+    this.loginInfo.key.encKey = encKey;
   }
 
   /**
@@ -204,7 +254,7 @@ class WhatsAppService {
    * 2. Send the message `<message_tag>,["admin","init",[0,4,315],["Windows","Chrome","10"],"<client_id>",true]`
    */
   init() {
-    this.loginInfo.clientId = cryptoService.randomBytes().toString("base64");
+    this.loginInfo.clientId = cryptoService.generateRandomBytes();
     const messageTag = Date.now();
 
     this.messagesQueue[messageTag] = {
@@ -212,7 +262,7 @@ class WhatsAppService {
     };
 
     this.ws.send(
-      `${messageTag},["admin","init",[0,4,315],["Windows","Chrome","10"],"${this.loginInfo.clientId}",true]`
+      `${messageTag},["admin","init",[0,4,315],["Windows Wilson","IE","7"],"${this.loginInfo.clientId}",true]`
     );
   }
 
