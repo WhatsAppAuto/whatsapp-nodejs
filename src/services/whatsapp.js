@@ -1,5 +1,6 @@
 const WebSocketService = require("./ws");
 const cryptoService = require("./crypto");
+const { whatsappReadBinary } = require("./whatsapp_reader");
 const { log, showQRCode } = require("../utils");
 
 /**
@@ -46,101 +47,85 @@ class WhatsAppService {
    * Handle a received message.
    * @param {String | Buffer} message
    */
-  handleMessage(message = "") {
-    let tag, content;
-    const isMessageBuffer = typeof message !== "string";
+  handleMessage(message) {
+    try {
+      if (typeof message === "string") {
+        const messageTag = message.substring(0, message.indexOf(","));
+        const data = JSON.parse(message.substring(message.indexOf(",") + 1));
 
-    if (!isMessageBuffer) {
-      [tag, ...content] = message.split(",");
-      content = content.join();
-    } else {
-      [tag] = message.toString().split(",");
-      content = message.slice(tag.length + 1);
-    }
-
-    if (this.messagesQueue[tag]) {
-      // the server responds to a client's message
-
-      const pend = this.messagesQueue[tag];
-
-      switch (pend.desc) {
-        case "_login": {
-          this.generateQR(content);
-          break;
-        }
-        case "_status": // TODO
-          break;
-
-        case "_restoresession": // TODO
-          break;
-      }
-    } else {
-      if (!isMessageBuffer && content) {
-        const obj = JSON.parse(content);
-
-        if (obj.length) {
-          // JSON content
-
-          const [name, payload] = obj;
-
-          switch (name) {
-            case "Conn": {
-              this.ping();
-              this.processConn(payload);
-              break;
-            }
-            case "Stream": {
-              break;
-            }
-            case "Props": {
-              break;
-            }
-          }
+        if (
+          this.messagesQueue[messageTag] &&
+          this.messagesQueue[messageTag].desc === "_login"
+        ) {
+          this.generateQR(data);
+        } else if (
+          Array.isArray(data) &&
+          data.length >= 2 &&
+          data[0] == "Conn"
+        ) {
+          this.ping();
+          this.processConn(data[1]);
         }
       } else {
-        if (content !== "") {
-          message = cryptoService.toArrayBuffer(message);
+        message = cryptoService.toArrayBuffer(message);
 
-          let ba = cryptoService.sjcl.bitArray;
-          let delimPos = new Uint8Array(message).indexOf(44); //look for index of comma because there is a message tag before it
-          let messageContent = cryptoService.sjcl.codec.arrayBuffer.toBits(
-            message.slice(delimPos + 1)
-          );
-          let hmacValidation = cryptoService.HmacSha256(
-            this.loginInfo.key.macKey,
-            cryptoService.ba.bitSlice(messageContent, 32 * 8)
-          );
-          if (
-            !cryptoService.sjcl.bitArray.equal(
-              hmacValidation,
+        let delimPos = new Uint8Array(message).indexOf(44); //look for index of comma because there is a message tag before it
+        let messageContent = cryptoService.sjcl.codec.arrayBuffer.toBits(
+          message.slice(delimPos + 1)
+        );
+        let hmacValidation = cryptoService.HmacSha256(
+          this.loginInfo.key.macKey,
+          cryptoService.ba.bitSlice(messageContent, 32 * 8)
+        );
+        if (
+          !cryptoService.sjcl.bitArray.equal(
+            hmacValidation,
+            cryptoService.ba.bitSlice(messageContent, 0, 32 * 8)
+          )
+        ) {
+          throw [
+            "hmac mismatch",
+            cryptoService.sjcl.codec.hex.fromBits(hmacValidation),
+            cryptoService.sjcl.codec.hex.fromBits(
               cryptoService.ba.bitSlice(messageContent, 0, 32 * 8)
             )
-          ) {
-            throw [
-              "hmac mismatch",
-              cryptoService.sjcl.codec.hex.fromBits(hmacValidation),
-              cryptoService.sjcl.codec.hex.fromBits(
-                ba.bitSlice(messageContent, 0, 32 * 8)
-              )
-            ];
-          }
-
-          let data = cryptoService.AESDecrypt(
-            this.loginInfo.key.encKey,
-            cryptoService.ba.bitSlice(messageContent, 32 * 8)
-          );
-
-          console.log(
-            "got binary data: ",
-            String.fromCharCode.apply(
-              null,
-              new Uint8Array(
-                cryptoService.sjcl.codec.arrayBuffer.fromBits(data, 0)
-              )
-            )
-          );
+          ];
         }
+
+        let data = cryptoService.AESDecrypt(
+          this.loginInfo.key.encKey,
+          cryptoService.ba.bitSlice(messageContent, 32 * 8)
+        );
+
+        // console.log("\n\n");
+
+        let arr = cryptoService.sjcl.codec.arrayBuffer.fromBits(data, 0);
+        let buff = Buffer.from(arr);
+
+        console.log(
+          String.fromCharCode.apply(
+            null,
+            new Uint8Array(
+              cryptoService.sjcl.codec.arrayBuffer.fromBits(data, 0)
+            ).slice(0, 100)
+          )
+        );
+
+        const processedData = whatsappReadBinary(buff);
+        console.log({ processedData });
+
+        console.log(
+          "\n",
+          " ----==================================================----",
+          "\n\n"
+        );
+
+        // console.log(Object.prototype.toString.call(message));
+
+        // TODO
       }
+    } catch (e) {
+      log("ERROR", e);
     }
   }
 
@@ -154,10 +139,10 @@ class WhatsAppService {
    *    - `Base64(publicKey)`
    *    - clientId
    *
-   * @param {String} content
+   * @param {{ ref: String }}
    */
-  generateQR(content) {
-    this.loginInfo.serverRef = JSON.parse(content).ref;
+  generateQR({ ref }) {
+    this.loginInfo.serverRef = ref;
 
     const {
       public: publicKey,
@@ -241,7 +226,7 @@ class WhatsAppService {
 
     const encKey = cryptoService.ba.bitSlice(keysDecrypted, 0, 32 * 8);
     const macKey = cryptoService.ba.bitSlice(keysDecrypted, 32 * 8);
-    console.log("got encoding and mac key.");
+    // console.log("got encoding and mac key.");
 
     this.loginInfo.key.macKey = macKey;
     this.loginInfo.key.encKey = encKey;
@@ -275,7 +260,11 @@ class WhatsAppService {
     this.ws.on("close", () => null);
     this.ws.on("error", () => null);
     this.ws.on("message", data => {
-      log("MESSAGE", data.slice(0, 22));
+      console.log(
+        "\n",
+        "----==================================================----"
+      );
+      log("NEW MESSAGE", data.slice(0, 50));
       this.handleMessage(data);
     });
   }
