@@ -1,6 +1,6 @@
 const WebSocketService = require("./ws");
 const cryptoService = require("./crypto");
-const { whatsappReadBinary } = require("./whatsapp_reader");
+const protoService = require("./proto");
 const { log, showQRCode } = require("../utils");
 
 /**
@@ -19,7 +19,7 @@ class WhatsAppService {
       secret: null,
       sharedSecret: null,
       secretPublicKey: null,
-      sharedSecretExpanded: null
+      sharedSecretExpanded: null,
     };
 
     this.loginInfo = {
@@ -29,8 +29,8 @@ class WhatsAppService {
       secretKey: null,
       key: {
         encKey: null,
-        macKey: null
-      }
+        macKey: null,
+      },
     };
 
     this.messagesQueue = {};
@@ -47,7 +47,7 @@ class WhatsAppService {
    * Handle a received message.
    * @param {String | Buffer} message
    */
-  handleMessage(message) {
+  async handleMessage(message) {
     try {
       if (typeof message === "string") {
         const messageTag = message.substring(0, message.indexOf(","));
@@ -65,6 +65,8 @@ class WhatsAppService {
         ) {
           this.ping();
           this.processConn(data[1]);
+        } else {
+          console.log(data);
         }
       } else {
         message = cryptoService.toArrayBuffer(message);
@@ -88,7 +90,7 @@ class WhatsAppService {
             cryptoService.sjcl.codec.hex.fromBits(hmacValidation),
             cryptoService.sjcl.codec.hex.fromBits(
               cryptoService.ba.bitSlice(messageContent, 0, 32 * 8)
-            )
+            ),
           ];
         }
 
@@ -102,17 +104,20 @@ class WhatsAppService {
         let arr = cryptoService.sjcl.codec.arrayBuffer.fromBits(data, 0);
         let buff = Buffer.from(arr);
 
+        /**
         console.log(
           String.fromCharCode.apply(
             null,
             new Uint8Array(
               cryptoService.sjcl.codec.arrayBuffer.fromBits(data, 0)
-            ).slice(0, 100)
+            ) //.slice(0, 100)
           )
         );
+         */
 
-        const processedData = whatsappReadBinary(buff);
-        console.log({ processedData });
+        console.log(buff);
+        let result = await this.proto.decode(buff);
+        console.log({ result });
 
         console.log(
           "\n",
@@ -146,7 +151,7 @@ class WhatsAppService {
 
     const {
       public: publicKey,
-      private: privateKey
+      private: privateKey,
     } = cryptoService.generateKeyPair();
 
     this.loginInfo["secretKey"] = privateKey;
@@ -155,7 +160,7 @@ class WhatsAppService {
     const qrCodeText = [
       this.loginInfo.serverRef,
       Buffer.from(publicKey).toString("base64"),
-      this.loginInfo.clientId
+      this.loginInfo.clientId,
     ].join(",");
 
     showQRCode(qrCodeText);
@@ -171,7 +176,7 @@ class WhatsAppService {
     secret,
     serverToken,
     sharedSecret,
-    wid
+    wid,
   }) {
     this.connectionOpts.clientToken = clientToken;
     this.connectionOpts.serverToken = serverToken;
@@ -238,12 +243,14 @@ class WhatsAppService {
    * 1. Generate a new Client ID (16 random bytes converted to Base64)
    * 2. Send the message `<message_tag>,["admin","init",[0,4,315],["Windows","Chrome","10"],"<client_id>",true]`
    */
-  init() {
+  async init() {
+    this.proto = await protoService();
+
     this.loginInfo.clientId = cryptoService.generateRandomBytes();
     const messageTag = Date.now();
 
     this.messagesQueue[messageTag] = {
-      desc: "_login"
+      desc: "_login",
     };
 
     this.ws.send(
@@ -259,12 +266,13 @@ class WhatsAppService {
     this.ws.on("open", () => this.init());
     this.ws.on("close", () => null);
     this.ws.on("error", () => null);
-    this.ws.on("message", data => {
+    this.ws.on("message", (data) => {
       console.log(
         "\n",
         "----==================================================----"
       );
-      log("NEW MESSAGE", data.slice(0, 50));
+
+      //log("NEW MESSAGE", data.slice(0, 50));
       this.handleMessage(data);
     });
   }
