@@ -1,7 +1,8 @@
 const WebSocketService = require("./ws");
 const cryptoService = require("./crypto");
-const protoService = require("./proto");
+const { whatsappReadBinary } = require("./whatsapp_reader");
 const { log, showQRCode } = require("../utils");
+const logger = require("./logger");
 
 /**
  * WhatsApp Service
@@ -66,7 +67,7 @@ class WhatsAppService {
           this.ping();
           this.processConn(data[1]);
         } else {
-          console.log(data);
+          //console.log(data);
         }
       } else {
         message = cryptoService.toArrayBuffer(message);
@@ -115,9 +116,19 @@ class WhatsAppService {
         );
          */
 
-        console.log(buff);
-        let result = await this.proto.decode(buff);
-        console.log({ result });
+        // console.log(buff);
+        //let result = await this.proto.decode(buff);
+        //console.log({ result });
+
+        try {
+          const msg = whatsappReadBinary(buff, true);
+          logger.info(msg);
+
+          // console.log("ret", { ret });
+          // console.log(JSON.stringify(ret, null, 2));
+        } catch (e) {
+          // console.log({ e });
+        }
 
         console.log(
           "\n",
@@ -244,8 +255,6 @@ class WhatsAppService {
    * 2. Send the message `<message_tag>,["admin","init",[0,4,315],["Windows","Chrome","10"],"<client_id>",true]`
    */
   async init() {
-    this.proto = await protoService();
-
     this.loginInfo.clientId = cryptoService.generateRandomBytes();
     const messageTag = Date.now();
 

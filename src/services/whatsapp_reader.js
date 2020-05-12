@@ -1,4 +1,11 @@
-const { WATags, WASingleByteTokens } = require("../whatsapp_defines");
+const {
+  WATags,
+  WASingleByteTokens,
+  WADoubleByteTokens,
+  WAWebMessageInfo,
+} = require("../whatsapp_defines");
+
+const logger = require("./logger");
 
 class WABinaryReader {
   /**
@@ -10,12 +17,19 @@ class WABinaryReader {
     this.index = 0;
   }
 
+  /**
+   * Check end of the data.
+   * @param {Number} length
+   */
   checkEOS(length) {
     if (this.index + length > this.data.length) {
       throw "end of stream reached";
     }
   }
 
+  /**
+   * Read next byte
+   */
   readByte() {
     this.checkEOS(1);
 
@@ -25,6 +39,11 @@ class WABinaryReader {
     return ret;
   }
 
+  /**
+   *
+   * @param {*} n
+   * @param {*} littleEndian
+   */
   readIntN(n, littleEndian = false) {
     this.checkEOS(n);
     let ret = 0;
@@ -40,6 +59,90 @@ class WABinaryReader {
 
   readInt16(littleEndian = false) {
     return this.readIntN(2, littleEndian);
+  }
+
+  readInt20() {
+    this.checkEOS(3);
+
+    const ret =
+      ((this.data[this.index] & 15) << 16) +
+      (this.data[this.index + 1] << 8) +
+      this.data[this.index + 2];
+
+    this.index += 3;
+
+    return ret;
+  }
+
+  readInt32(littleEndian = false) {
+    return this.readIntN(4, littleEndian);
+  }
+
+  readInt64(littleEndian) {
+    return this.readIntN(8, littleEndian);
+  }
+
+  readPacked8(tag) {
+    const startByte = this.readByte();
+    let ret = "";
+
+    for (let i = 0; i < (startByte & 127); i++) {
+      const currByte = this.readByte();
+
+      ret +=
+        this.unpackByte(tag, (currByte & 0xf0) >> 4) +
+        this.unpackByte(tag, currByte & 0x0f);
+    }
+
+    if (startByte >> 7 != 0) {
+      ret = ret.slice(0, ret.length - 1);
+    }
+
+    return ret;
+  }
+
+  unpackByte(tag, value) {
+    if (tag == WATags.NIBBLE_8) {
+      return this.unpackNibble(value);
+    } else if (tag == WATags.HEX_8) {
+      return this.unpackHex(value);
+    }
+  }
+
+  unpackNibble(value) {
+    if (value >= 0 && value <= 9) {
+      return String.fromCharCode("0".charCodeAt(0) + value);
+    } else if (value == 10) {
+      return "-";
+    } else if (value == 11) {
+      return ".";
+    } else if (value == 15) {
+      return "\0";
+    }
+
+    throw "invalid nibble to unpack: " + value;
+  }
+
+  unpackHex(value) {
+    if (value < 0 || value > 15) {
+      throw "invalid hex to unpack: " + value;
+    }
+
+    if (value < 10) {
+      return String.fromCharCode("0".charCodeAt(0) + value);
+    } else {
+      return String.fromCharCode("A".charCodeAt(0) + value - 10);
+    }
+  }
+
+  readRangedVarInt(minVal, maxVal, desc = "unknown") {
+    let ret = this.readVarInt();
+
+    if (ret < minVal || ret >= maxVal) {
+      throw "varint for " + desc + " is out of bounds: " + ret;
+    }
+
+    return ret;
   }
 
   isListTag(tag) {
@@ -103,7 +206,7 @@ class WABinaryReader {
   readStringFromChars(length) {
     this.checkEOS(length);
 
-    const ret = this.data.slice(this.index, this.index + length).toString();
+    const ret = this.data.slice(this.index, this.index + length);
     this.index += length;
 
     return ret;
@@ -135,15 +238,15 @@ class WABinaryReader {
   }
 
   readNode() {
-    console.log("===");
+    // console.log("===");
 
     const listSize = this.readListSize(this.readByte());
     const descrTag = this.readByte();
 
-    console.log({
-      listSize,
-      descrTag,
-    });
+    // console.log({
+    //   listSize,
+    //   descrTag,
+    // });
 
     if (descrTag == WATags.STREAM_END) {
       throw "unexpected stream end";
@@ -151,7 +254,7 @@ class WABinaryReader {
 
     const descr = this.readString(descrTag);
 
-    console.log({ descr });
+    // console.log({ descr });
 
     if (listSize == 0 || !descr) {
       throw "invalid node";
@@ -159,7 +262,7 @@ class WABinaryReader {
 
     const attrs = this.readAttributes((listSize - 1) >> 1);
 
-    console.log({ attrs });
+    // console.log({ attrs });
 
     if (listSize % 2 == 1) {
       return [descr, attrs, null];
@@ -167,23 +270,31 @@ class WABinaryReader {
 
     const tag = this.readByte();
 
-    console.log({ tag });
+    // console.log({ tag });
 
     let content;
     if (this.isListTag(tag)) {
       content = this.readList(tag);
     } else if (tag == WATags.BINARY_8) {
-      // content = this.readBytes(this.readByte());
+      content = this.readBytes(this.readByte());
+    } else if (tag == WATags.BINARY_20) {
+      content = this.readBytes(this.readInt20());
+    } else if (tag == WATags.BINARY_32) {
+      content = this.readBytes(this.readInt32());
+    } else {
+      content = this.readString(tag);
     }
 
-    console.log({ content });
+    // console.log({ content });
+
+    return [descr, attrs, content];
   }
 
   readBytes(n) {
-    const ret = "";
+    let ret = "";
 
     for (let i = 0; i < n; i++) {
-      ret += this.readByte().toString();
+      ret += String.fromCharCode(this.readByte());
     }
 
     return ret;
@@ -194,18 +305,45 @@ class WABinaryReader {
       throw `invalid token index: ${index}`;
     return WASingleByteTokens[index];
   }
+
+  getTokenDouble(index1, index2) {
+    const n = 256 * index1 + index2;
+
+    if (n < 0 || n >= WADoubleByteTokens.length) {
+      throw "invalid token index: " + n;
+    }
+
+    return WADoubleByteTokens[n];
+  }
 }
 
-const buffer = Buffer.from(
-  "f8 06 09 0a 10 2f 5a f8 14 f8 02 34 fd 00 01 b8 0a 42 0a 1c 35 37 33 30 31 32 33 31 36 33 36 39 2d 31 35 38 34 37 35 30 37 32 30 40 67 2e 75 73 10 00".replace(
-    / +/g,
-    ""
-  ),
-  "hex"
-);
+const whatsappReadMessageArray = (msgs) => {
+  if (!Array.isArray(msgs)) return msgs;
 
-console.log(buffer);
+  const ret = [];
 
-const reader = new WABinaryReader(buffer);
+  for (let x of msgs) {
+    ret.push(
+      Array.isArray(x) && x[0] == "message" ? WAWebMessageInfo.decode(x[2]) : x
+    );
+  }
 
-reader.readNode();
+  return ret;
+};
+
+const whatsappReadBinary = (data, withMessages = false) => {
+  const node = new WABinaryReader(data).readNode();
+
+  // console.log("whatsappReadBinary", { whatsappReadBinary: node });
+
+  if (withMessages && !!node[1]) {
+    //  console.log("whatsappReadMessageArray");
+    node[2] = whatsappReadMessageArray(node[2]);
+  }
+
+  return node;
+};
+
+module.exports = {
+  whatsappReadBinary,
+};

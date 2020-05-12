@@ -1,5 +1,9 @@
 const protobuf = require("protobufjs");
-const whatsapp_protobuf_pb2 = protobuf.loadSync(__dirname + "/def.proto");
+const path = require("path");
+
+const whatsapp_protobuf_pb2 = protobuf.loadSync(
+  path.join(__dirname, "def.proto")
+);
 
 const WATags = {
   LIST_EMPTY: 0,
@@ -17,7 +21,7 @@ const WATags = {
   BINARY_32: 254,
   NIBBLE_8: 255,
   SINGLE_BYTE_MAX: 256,
-  PACKED_MAX: 254
+  PACKED_MAX: 254,
 };
 
 const WASingleByteTokens = [
@@ -182,7 +186,21 @@ const WASingleByteTokens = [
   "color",
   "call",
   "offer",
-  "call-id"
+  "call-id",
+  "quick_reply",
+  "sticker",
+  "pay_t",
+  "accept",
+  "reject",
+  "sticker_pack",
+  "invalid",
+  "canceled",
+  "missed",
+  "connected",
+  "result",
+  "audio",
+  "video",
+  "recent",
 ];
 
 const WADoubleByteTokens = [];
@@ -235,7 +253,7 @@ const WAMetrics = {
   QUERY_NEXT_LABEL_COLOR: 45,
   QUERY_LABEL_PALETTE: 46,
   CREATE_OR_DELETE_LABELS: 47,
-  EDIT_LABELS: 48
+  EDIT_LABELS: 48,
 };
 
 const WAFlags = {
@@ -244,7 +262,7 @@ const WAFlags = {
   AVAILABLE: 1 << 5,
   NOT_AVAILABLE: 1 << 4,
   EXPIRES: 1 << 3,
-  SKIP_OFFLINE: 1 << 2
+  SKIP_OFFLINE: 1 << 2,
 };
 
 const WAMediaAppInfo = {
@@ -252,25 +270,29 @@ const WAMediaAppInfo = {
   stickerMessage: "WhatsApp Image Keys",
   videoMessage: "WhatsApp Video Keys",
   audioMessage: "WhatsApp Audio Keys",
-  documentMessage: "WhatsApp Document Keys"
+  documentMessage: "WhatsApp Document Keys",
 };
 
 const WAWebMessageInfo = {
-  decode: data => {
-    console.log(data);
+  decode: (data) => {
+    const WebMessageInfo = whatsapp_protobuf_pb2.lookupType("WebMessageInfo");
+
+    return WebMessageInfo.decode(Buffer.from(data));
+
+    // console.log(data);
     //const msg = whatsapp_protobuf_pb2.  .WebMessageInfo();
     //msg.ParseFromString(data);
     //return json.loads(json_format.MessageToJson(msg));
   },
 
-  encode: msg => {
+  encode: (msg) => {
     //data = json_format.Parse(
     //json.dumps(msg),
     //whatsapp_protobuf_pb2.WebMessageInfo(),
     //(ignore_unknown_fields = True)
     //);
     //return data.SerializeToString();
-  }
+  },
 };
 
 module.exports = {
@@ -280,5 +302,5 @@ module.exports = {
   WAMetrics,
   WAFlags,
   WAMediaAppInfo,
-  WAWebMessageInfo
+  WAWebMessageInfo,
 };
