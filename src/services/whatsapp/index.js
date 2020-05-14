@@ -104,7 +104,7 @@ class WhatsAppService extends EventEmitter {
         const arr = cryptoService.sjcl.codec.arrayBuffer.fromBits(data, 0);
 
         try {
-          const msg = whatsappReadBinary(Buffer.from(arr), true);
+          let msg = whatsappReadBinary(Buffer.from(arr), true);
           this.emit("message", msg);
         } catch (e) {}
       }
